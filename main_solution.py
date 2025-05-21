@@ -1,12 +1,20 @@
 import streamlit as st
 import pandas as pd
 import ollama
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+import spacy
+
+from collections import Counter
+import os, string
+from typing import Dict, Tuple, List, Optional
+
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
-from sklearn.metrics import confusion_matrix, classification_report
-from collections import Counter
-import os
-from typing import Dict, Tuple, List, Optional
+import seaborn as sns
 
 # Constants
 GENERATION_MODEL = "deepseek-r1:7b"  # LLM for reasoning (~20s per text)
@@ -107,8 +115,107 @@ def load_utterances(files: List) -> Tuple[Dict, Dict]:
 
     return documents, agent_docs
 
+# Load spaCy's English model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("spaCy English model not found. Please install it by running:")
+    st.code("python -m spacy download en_core_web_sm")
+    st.stop()
 
 # Analysis Functions
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+import spacy
+import string
+from collections import Counter
+
+# Load spaCy's English model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("spaCy English model not found. Please install it by running:")
+    st.code("python -m spacy download en_core_web_sm")
+    st.stop()
+
+def analyze_texts(texts):
+    """For brief EDA, analyze texts and return a DataFrame with metrics, topics, and clustering results."""
+    results = []
+
+    # Basic text metrics
+    for i, text in enumerate(texts):
+        if not text.strip():
+            continue
+
+        doc = nlp(text)
+        sentence_count = len(list(doc.sents))
+        word_count = len([token.text.lower() for token in doc
+                          if not token.is_stop and not token.is_punct])
+
+        results.append({
+            'Text ID': f"Text {i + 1}",
+            'Sentences': sentence_count,
+            'Words': word_count,
+            'Original Text': text[:200] + '...' if len(text) > 200 else text
+        })
+
+    df = pd.DataFrame(results)
+
+    # TF-IDF and topic extraction
+    if len(texts) > 1:
+        vectorizer = TfidfVectorizer(max_features=50, stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        features = vectorizer.get_feature_names_out()
+
+        # Get top keywords for each text
+        topics = []
+        for i in range(len(texts)):
+            if i < len(df):
+                tfidf_scores = zip(features, tfidf_matrix[i].toarray()[0])
+                top_keywords = sorted(tfidf_scores, key=lambda x: x[1], reverse=True)[:3]
+                topics.append(", ".join([kw[0] for kw in top_keywords]))
+
+        if len(topics) == len(df):
+            df['Main Topics'] = topics
+
+        # Hierarchical clustering
+        similarity_matrix = cosine_similarity(tfidf_matrix)
+        linkage_matrix = linkage(1 - similarity_matrix, 'average')
+
+        # Get cluster assignments
+        max_clusters = min(6, len(texts))  # Don't exceed number of texts
+        cluster_assignments = fcluster(linkage_matrix, t=max_clusters, criterion='maxclust')
+        df['Cluster'] = cluster_assignments
+
+        # Count texts per cluster (top 6)
+        cluster_counts = df['Cluster'].value_counts().sort_values(ascending=False).head(6)
+        cluster_counts.index = [f'Cluster {i}' for i in cluster_counts.index]
+
+        # Get top topics for each cluster
+        cluster_topics = {}
+        for cluster_num in range(1, max_clusters + 1):
+            cluster_texts = df[df['Cluster'] == cluster_num]['Original Text']
+            if len(cluster_texts) > 0:
+                cluster_vectorizer = TfidfVectorizer(max_features=10, stop_words='english')
+                cluster_tfidf = cluster_vectorizer.fit_transform(cluster_texts)
+                cluster_features = cluster_vectorizer.get_feature_names_out()
+
+                # Sum TF-IDF scores across all documents in cluster
+                sums = cluster_tfidf.sum(axis=0)
+                top_indices = sums.argsort()[0, -5:][::-1]  # Get top 5 indices
+                top_terms = [cluster_features[i] for i in top_indices.flatten().tolist()[0]]
+                cluster_topics[f"Cluster {cluster_num}"] = ", ".join(top_terms)
+
+        return df, linkage_matrix, texts, cluster_topics, cluster_counts
+
+    return df, None, texts, None
+
+
 def call_llm(model: str, system_prompt: str, user_prompt: str) -> str:
     """Make a call to the LLM with proper error handling"""
     try:
@@ -314,6 +421,79 @@ def generate_temporal_plot(
 
     return fig
 
+def plot_cluster_topics(cluster_topics):
+    """Plot the key topics for each cluster."""
+    if not cluster_topics:
+        return None
+
+    plt.figure(figsize=(10, 6))
+    clusters = list(cluster_topics.keys())
+    topics = list(cluster_topics.values())
+
+    # Create horizontal bar plot
+    y_pos = range(len(clusters))
+    plt.barh(y_pos, [5] * len(clusters), color='skyblue')  # Dummy values for bars
+    plt.yticks(y_pos, clusters)
+
+    # Add topic text
+    for i, (cluster, topic) in enumerate(cluster_topics.items()):
+        plt.text(0.5, i, topic, ha='left', va='center', fontsize=10)
+
+    plt.title('Key Topics for Each Cluster')
+    plt.xlabel('Top Terms')
+    plt.xlim(0, 1)  # Just for spacing
+    plt.gca().xaxis.set_visible(False)
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.gca().spines['bottom'].set_visible(False)
+    plt.tight_layout()
+    return plt.gcf()
+
+
+def plot_grouped_histogram(df):
+    """Plot grouped histogram for word and sentence counts."""
+    plot_df = df.melt(id_vars=['Text ID'],
+                      value_vars=['Sentences', 'Words'],
+                      var_name='Metric',
+                      value_name='Count')
+
+    plt.figure(figsize=(10, 6))
+    ax = sns.barplot(data=plot_df,
+                     x='Text ID',
+                     y='Count',
+                     hue='Metric',
+                     palette=['#1f77b4', '#ff7f0e'])
+
+    plt.title('Word and Sentence Counts by Text')
+    plt.xlabel('Text ID')
+    plt.ylabel('Count')
+    plt.xticks(rotation=45)
+    plt.legend(title='Metric')
+
+    for p in ax.patches:
+        ax.annotate(f"{int(p.get_height())}",
+                    (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='center',
+                    xytext=(0, 5),
+                    textcoords='offset points')
+
+    plt.tight_layout()
+    return plt.gcf()
+
+
+def plot_dendrogram(linkage_matrix, labels):
+    """Plot a dendrogram from linkage matrix."""
+    plt.figure(figsize=(10, 6))
+    dendrogram(linkage_matrix,
+               labels=labels,
+               orientation='left',
+               leaf_font_size=10,
+               color_threshold=0.7)
+    plt.title('Hierarchical Clustering Dendrogram')
+    plt.xlabel('Distance')
+    plt.tight_layout()
+    return plt.gcf()
+
 
 def get_insights(sentiment_df: pd.DataFrame, outcome_df: pd.DataFrame) -> Dict:
     """Generate visual insights from analysis results"""
@@ -456,15 +636,90 @@ def main():
             st.success(f"Loaded {len(st.session_state.documents)} transcripts")
 
     # Analysis tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Brief EDA",
         "Sentiment Analysis",
         "Outcome Analysis",
         "Evaluation",
         "Insights"
     ])
 
-    # Sentiment Analysis Tab
+    # Brief EDA
     with tab1:
+        st.header("Brief EDA")
+        if st.button("Run Brief EDA", key="eda_btn"):
+            if st.session_state.documents:
+                texts = [text for _, text in st.session_state.documents.items()]
+                # Analyze texts
+                df, linkage_matrix, texts, cluster_topics, cluster_counts = analyze_texts(texts)
+
+                # Display results
+                st.header("Text Analysis Results")
+                st.dataframe(df)
+
+                # Visualizations
+                st.header("Visualizations")
+
+                # Grouped histogram for word and sentence counts
+                st.subheader("Word and Sentence Counts")
+                fig = plot_grouped_histogram(df)
+                st.pyplot(fig)
+
+                # Show topics if available
+                if 'Main Topics' in df.columns:
+                    st.subheader("Main Topics by TF-IDF")
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    df['Topics Truncated'] = df['Main Topics'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
+                    sns.barplot(data=df, x='Topics Truncated', y='Text ID', ax=ax)
+                    plt.xticks(rotation=45, ha='right')
+                    plt.xlabel("Top Keywords")
+                    plt.ylabel("Text ID")
+                    st.pyplot(fig)
+
+                # Hierarchical clustering visualization
+                if linkage_matrix is not None:
+                    st.subheader("Hierarchical Clustering Dendrogram")
+                    st.write("""
+                        This dendrogram shows how texts are clustered based on their TF-IDF similarity.
+                        Texts that are closer together are more similar in content.
+                        """)
+
+                    labels = [f"Text {i + 1}: {text[:30]}..." for i, text in enumerate(texts)]
+                    fig = plot_dendrogram(linkage_matrix, labels)
+                    st.pyplot(fig)
+
+                    # Cluster topics visualization
+                    if cluster_topics:
+                        st.subheader("Key Topics for Each Cluster")
+                        st.write("""
+                            These are the most important terms (by TF-IDF) that characterize each cluster.
+                            """)
+
+                        fig = plot_cluster_topics(cluster_topics)
+                        st.pyplot(fig)
+
+                        # Display cluster members
+                        st.subheader("Cluster Members")
+                        for cluster_num in sorted(df['Cluster'].unique()):
+                            cluster_df = df[df['Cluster'] == cluster_num]
+                            st.markdown(f"**Cluster {cluster_num}** ({len(cluster_df)} texts):")
+                            st.dataframe(cluster_df[['Text ID', 'Main Topics']])
+
+                        # Generate and display pie chart
+                        cluster_pie_chart = generate_pie_chart(cluster_counts, "Top 6 Clusters by Number of Texts")
+                        st.subheader("Cluster Distribution")
+                        st.pyplot(cluster_pie_chart)
+
+                # Show raw data
+                if st.checkbox("Show raw data"):
+                    st.subheader("Raw Data")
+                    st.write(df)
+
+            else:
+                st.error("No documents uploaded yet. Please upload files first.")
+
+    # Sentiment Analysis Tab
+    with tab2:
         st.header("Sentiment Analysis")
 
         if st.button("Run Sentiment Analysis", key="sentiment_btn"):
@@ -496,7 +751,7 @@ def main():
                 st.error("No documents uploaded yet. Please upload files first.")
 
     # Outcome Analysis Tab
-    with tab2:
+    with tab3:
         st.header("Outcome Analysis")
 
         if st.button("Run Outcome Analysis", key="outcome_btn"):
@@ -528,7 +783,7 @@ def main():
                 st.error("No documents uploaded yet. Please upload files first.")
 
     # Evaluation Tab
-    with tab3:
+    with tab4:
         st.header("Evaluation Metrics")
 
         col1, col2 = st.columns(2)
@@ -582,7 +837,7 @@ def main():
                 st.dataframe(outcometrics["Classification Report"].style.format("{:.3f}"))
 
     # Insights Tab
-    with tab4:
+    with tab5:
         st.header("Useful Insights")
         insight_senti_file = st.file_uploader(
             "Upload predicted sentiment results (CSV):",
