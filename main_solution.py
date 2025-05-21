@@ -124,16 +124,6 @@ except OSError:
     st.stop()
 
 # Analysis Functions
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-import spacy
-import string
-from collections import Counter
 
 # Load spaCy's English model
 try:
